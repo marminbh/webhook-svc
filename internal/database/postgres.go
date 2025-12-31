@@ -3,13 +3,15 @@ package database
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
-	"github.com/marminbh/webhook-svc/internal/config"
+	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/marminbh/webhook-svc/internal/config"
+	"github.com/marminbh/webhook-svc/internal/logger"
 )
 
 var DB *gorm.DB
@@ -21,7 +23,7 @@ func Connect(cfg *config.DatabaseConfig) error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: gormlogger.Default.LogMode(gormlogger.Info),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -48,7 +50,11 @@ func Connect(cfg *config.DatabaseConfig) error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	log.Println("Successfully connected to PostgreSQL with GORM")
+	logger.Info("Successfully connected to PostgreSQL",
+		zap.String("host", cfg.Host),
+		zap.String("port", cfg.Port),
+		zap.String("database", cfg.DBName),
+	)
 	return nil
 }
 
@@ -62,7 +68,7 @@ func Close() error {
 		if err := sqlDB.Close(); err != nil {
 			return err
 		}
-		log.Println("PostgreSQL connection closed")
+		logger.Info("PostgreSQL connection closed")
 	}
 	return nil
 }

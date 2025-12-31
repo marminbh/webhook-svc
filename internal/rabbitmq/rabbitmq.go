@@ -2,11 +2,13 @@ package rabbitmq
 
 import (
 	"fmt"
-	"log"
 	"time"
 
-	"github.com/marminbh/webhook-svc/internal/config"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.uber.org/zap"
+
+	"github.com/marminbh/webhook-svc/internal/config"
+	"github.com/marminbh/webhook-svc/internal/logger"
 )
 
 var Conn *amqp.Connection
@@ -29,7 +31,11 @@ func Connect(cfg *config.RabbitMQConfig) error {
 		return fmt.Errorf("failed to open channel: %w", err)
 	}
 
-	log.Println("Successfully connected to RabbitMQ")
+	logger.Info("Successfully connected to RabbitMQ",
+		zap.String("host", cfg.Host),
+		zap.String("port", cfg.Port),
+		zap.String("vhost", cfg.VHost),
+	)
 	return nil
 }
 
@@ -40,7 +46,7 @@ func Close() {
 	}
 	if Conn != nil {
 		Conn.Close()
-		log.Println("RabbitMQ connection closed")
+		logger.Info("RabbitMQ connection closed")
 	}
 }
 
@@ -107,4 +113,67 @@ func ConsumeMessages(queue, consumer string, autoAck, exclusive, noLocal, noWait
 	}
 
 	return messages, nil
+}
+
+// DeclareExchange declares an exchange if it doesn't exist
+func DeclareExchange(name, kind string, durable, autoDelete, internal, noWait bool) error {
+	if Channel == nil {
+		return fmt.Errorf("RabbitMQ channel is not initialized")
+	}
+
+	err := Channel.ExchangeDeclare(
+		name,       // exchange name
+		kind,       // exchange type (direct, topic, fanout, headers)
+		durable,    // durable
+		autoDelete, // delete when unused
+		internal,   // internal
+		noWait,     // no-wait
+		nil,        // arguments
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to declare exchange %s: %w", name, err)
+	}
+
+	return nil
+}
+
+// BindQueue binds a queue to an exchange with a routing key
+func BindQueue(queue, routingKey, exchange string, noWait bool) error {
+	if Channel == nil {
+		return fmt.Errorf("RabbitMQ channel is not initialized")
+	}
+
+	err := Channel.QueueBind(
+		queue,      // queue name
+		routingKey, // routing key
+		exchange,   // exchange name
+		noWait,     // no-wait
+		nil,        // arguments
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to bind queue %s to exchange %s with routing key %s: %w", queue, exchange, routingKey, err)
+	}
+
+	return nil
+}
+
+// SetQoS sets the quality of service (prefetch count) for the channel
+func SetQoS(prefetchCount, prefetchSize int, global bool) error {
+	if Channel == nil {
+		return fmt.Errorf("RabbitMQ channel is not initialized")
+	}
+
+	err := Channel.Qos(
+		prefetchCount, // prefetch count
+		prefetchSize,  // prefetch size (0 = unlimited)
+		global,        // global (apply to all consumers on this channel)
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to set QoS: %w", err)
+	}
+
+	return nil
 }

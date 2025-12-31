@@ -1,51 +1,64 @@
 package main
 
 import (
-	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
+	fiberlogger "github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"go.uber.org/zap"
 
 	"github.com/marminbh/webhook-svc/internal/config"
 	"github.com/marminbh/webhook-svc/internal/database"
-	"github.com/marminbh/webhook-svc/internal/models"
+	"github.com/marminbh/webhook-svc/internal/dispatcher"
+	"github.com/marminbh/webhook-svc/internal/logger"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 	"github.com/marminbh/webhook-svc/internal/routes"
 )
 
 func main() {
+	// Initialize logger (production mode by default, can be changed via env)
+	devMode := os.Getenv("LOG_LEVEL") == "debug"
+	if err := logger.Init(devMode); err != nil {
+		panic("Failed to initialize logger: " + err.Error())
+	}
+	defer logger.Sync()
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		logger.Fatal("Failed to load config", zap.Error(err))
 	}
 
 	// Connect to PostgreSQL
 	if err := database.Connect(&cfg.Database); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
+			logger.Error("Error closing database", zap.Error(err))
 		}
 	}()
 
-	// Run migrations
-	if err := database.AutoMigrate(&models.WebhookConfig{}); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
-
 	// Connect to RabbitMQ
 	if err := rabbitmq.Connect(&cfg.RabbitMQ); err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		logger.Fatal("Failed to connect to RabbitMQ", zap.Error(err))
 	}
 	defer rabbitmq.Close()
+
+	// Initialize and start dispatcher
+	disp := dispatcher.NewDispatcher(&cfg.Dispatcher)
+	if err := disp.Start(); err != nil {
+		logger.Fatal("Failed to start dispatcher", zap.Error(err))
+	}
+	defer func() {
+		if err := disp.Stop(); err != nil {
+			logger.Error("Error stopping dispatcher", zap.Error(err))
+		}
+	}()
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -55,7 +68,7 @@ func main() {
 
 	// Middleware
 	app.Use(recover.New())
-	app.Use(logger.New(logger.Config{
+	app.Use(fiberlogger.New(fiberlogger.Config{
 		Format: "[${time}] ${status} - ${latency} ${method} ${path}\n",
 	}))
 	app.Use(cors.New(cors.Config{
@@ -67,23 +80,31 @@ func main() {
 	// Setup routes
 	routes.SetupRoutes(app)
 
-	// Start server
+	// Start server in a goroutine
 	go func() {
 		addr := cfg.Server.Host + ":" + cfg.Server.Port
-		log.Printf("Server starting on %s", addr)
+		logger.Info("Server starting",
+			zap.String("address", addr),
+		)
 		if err := app.Listen(addr); err != nil {
-			log.Fatalf("Failed to start server: %v", err)
+			logger.Fatal("Failed to start server", zap.Error(err))
 		}
 	}()
 
-	// Wait for interrupt signal
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	<-ctx.Done()
+	// Wait for interrupt signal to gracefully shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
 
-	log.Println("Shutting down server...")
+	logger.Info("Shutting down server")
 	if err := app.Shutdown(); err != nil {
-		log.Printf("Error during server shutdown: %v", err)
+		logger.Error("Error during server shutdown", zap.Error(err))
 	}
-	log.Println("Server stopped")
+
+	// Stop dispatcher
+	if err := disp.Stop(); err != nil {
+		logger.Error("Error stopping dispatcher", zap.Error(err))
+	}
+
+	logger.Info("Server stopped")
 }
