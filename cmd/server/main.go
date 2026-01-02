@@ -64,6 +64,9 @@ func main() {
 	// Create health handler with dependencies
 	healthHandler := handlers.NewHealthHandler(db, rmqConn)
 
+	// Create events handler with dependencies
+	eventsHandler := handlers.NewEventsHandler(db, appLogger)
+
 	// Initialize and start dispatcher with dependencies
 	disp := dispatcher.NewDispatcher(&cfg.Dispatcher, rmqConn, db, appLogger)
 	if err := disp.Start(); err != nil {
@@ -93,7 +96,7 @@ func main() {
 	}))
 
 	// Setup routes with dependencies
-	routes.SetupRoutes(app, healthHandler)
+	routes.SetupRoutes(app, healthHandler, eventsHandler)
 
 	// Start server in a goroutine
 	go func() {

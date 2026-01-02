@@ -6,7 +6,7 @@ import (
 )
 
 // SetupRoutes configures all application routes with dependencies
-func SetupRoutes(app *fiber.App, healthHandler *handlers.HealthHandler) {
+func SetupRoutes(app *fiber.App, healthHandler *handlers.HealthHandler, eventsHandler *handlers.EventsHandler) {
 	// Health check endpoint
 	app.Get("/health", healthHandler.HealthCheck)
 
@@ -20,5 +20,8 @@ func SetupRoutes(app *fiber.App, healthHandler *handlers.HealthHandler) {
 				"status":  "running",
 			})
 		})
+
+		// Events endpoint
+		api.Get("/events", eventsHandler.GetEvents)
 	}
 }

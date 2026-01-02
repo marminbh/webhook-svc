@@ -11,12 +11,18 @@ import (
 
 // checkDuplicateEvent checks if an event with the same event_type and resource_id
 // already exists with a status that indicates it's not yet delivered (pending, queued, processing)
+// Uses SELECT FOR UPDATE to lock matching rows and prevent race conditions
 func checkDuplicateEvent(db *gorm.DB, eventType, resourceID string) (bool, error) {
 	var count int64
-	err := db.Model(&models.WebhookEvent{}).
-		Where("event_type = ? AND resource_id = ? AND status IN (?, ?, ?)",
-			eventType, resourceID, "pending", "queued", "processing").
-		Count(&count).Error
+	// Use raw SQL with FOR UPDATE to lock any matching rows, preventing concurrent duplicate creation
+	// This ensures that if two concurrent requests check for duplicates, one will wait for the other
+	// to complete before proceeding, preventing race conditions
+	err := db.Raw(`
+		SELECT COUNT(*) 
+		FROM webhook_events 
+		WHERE event_type = $1 AND resource_id = $2 AND status IN ($3, $4, $5)
+		FOR UPDATE
+	`, eventType, resourceID, "pending", "queued", "processing").Scan(&count).Error
 
 	if err != nil {
 		return false, err
@@ -52,6 +58,7 @@ func createWebhookEvents(
 	webhookConfigs []models.WebhookConfig,
 	eventType, resourceID, resourceURL, tenantID string,
 	eventTimestamp time.Time,
+	maxAttempts, batchSize int,
 ) ([]models.WebhookEvent, error) {
 	if len(webhookConfigs) == 0 {
 		return []models.WebhookEvent{}, nil
@@ -70,7 +77,7 @@ func createWebhookEvents(
 			EventType:       eventType,
 			EventTimestamp:  eventTimestamp,
 			AttemptCount:    0,
-			MaxAttempts:     8,
+			MaxAttempts:     maxAttempts,
 			Status:          "pending",
 			NextAttemptAt:   now,
 			CreatedAt:       now,
@@ -79,8 +86,8 @@ func createWebhookEvents(
 		events = append(events, event)
 	}
 
-	// Batch insert using GORM
-	err := db.CreateInBatches(events, 100).Error
+	// Batch insert using GORM with configurable batch size
+	err := db.CreateInBatches(events, batchSize).Error
 	if err != nil {
 		return nil, err
 	}
@@ -134,4 +141,60 @@ func getWebhookConfigsByTenant(db *gorm.DB, tenantID string) ([]models.WebhookCo
 // transactionWrapper wraps database operations in a transaction
 func transactionWrapper(db *gorm.DB, fn func(*gorm.DB) error) error {
 	return db.Transaction(fn)
+}
+
+// checkAndCreateWebhookEvents atomically checks for duplicates and creates webhook events
+// This prevents race conditions where multiple concurrent requests could create duplicate events
+func checkAndCreateWebhookEvents(
+	db *gorm.DB,
+	webhookConfigs []models.WebhookConfig,
+	eventType, resourceID, resourceURL, tenantID string,
+	eventTimestamp time.Time,
+	maxAttempts, batchSize int,
+) ([]models.WebhookEvent, bool, error) {
+	if len(webhookConfigs) == 0 {
+		return []models.WebhookEvent{}, false, nil
+	}
+
+	var events []models.WebhookEvent
+	var isDuplicate bool
+
+	// Wrap duplicate check and event creation in a transaction
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// Check for duplicates with row-level locking
+		duplicate, err := checkDuplicateEvent(tx, eventType, resourceID)
+		if err != nil {
+			return err
+		}
+
+		if duplicate {
+			isDuplicate = true
+			return nil // Return early, don't create events
+		}
+
+		// No duplicates found, create events
+		createdEvents, err := createWebhookEvents(
+			tx,
+			webhookConfigs,
+			eventType,
+			resourceID,
+			resourceURL,
+			tenantID,
+			eventTimestamp,
+			maxAttempts,
+			batchSize,
+		)
+		if err != nil {
+			return err
+		}
+
+		events = createdEvents
+		return nil
+	})
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	return events, isDuplicate, nil
 }

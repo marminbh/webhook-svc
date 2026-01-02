@@ -200,26 +200,6 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		zap.String("org_id", sourceEvent.OrgID),
 	)
 
-	// Check for duplicate events
-	isDuplicate, err := checkDuplicateEvent(d.db, string(sourceEvent.EventType), sourceEvent.ResourceID)
-	if err != nil {
-		d.logger.Error("Error checking duplicate event",
-			zap.String("event_type", string(sourceEvent.EventType)),
-			zap.String("resource_id", sourceEvent.ResourceID),
-			zap.Error(err),
-		)
-		return fmt.Errorf("error checking duplicate event: %w", err)
-	}
-
-	if isDuplicate {
-		d.logger.Info("Skipping duplicate event",
-			zap.String("event_type", string(sourceEvent.EventType)),
-			zap.String("resource_id", sourceEvent.ResourceID),
-		)
-		// Return nil to ACK - we've processed it (even though we skipped it)
-		return nil
-	}
-
 	// Get active webhook configs for the org
 	webhookConfigs, err := getWebhookConfigsByTenant(d.db, sourceEvent.OrgID)
 	if err != nil {
@@ -238,8 +218,9 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		return nil
 	}
 
-	// Create webhook_events for each config
-	events, err := createWebhookEvents(
+	// Atomically check for duplicates and create webhook events in a transaction
+	// This prevents race conditions where concurrent requests could create duplicate events
+	events, isDuplicate, err := checkAndCreateWebhookEvents(
 		d.db,
 		webhookConfigs,
 		string(sourceEvent.EventType),
@@ -247,15 +228,26 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		sourceEvent.ResourceURL,
 		sourceEvent.OrgID,
 		sourceEvent.Timestamp,
+		d.cfg.MaxAttempts,
+		d.cfg.BatchSize,
 	)
 	if err != nil {
-		d.logger.Error("Error creating webhook events",
+		d.logger.Error("Error in atomic duplicate check and event creation",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.String("org_id", sourceEvent.OrgID),
 			zap.Error(err),
 		)
-		return fmt.Errorf("error creating webhook events: %w", err)
+		return fmt.Errorf("error in atomic duplicate check and event creation: %w", err)
+	}
+
+	if isDuplicate {
+		d.logger.Info("Skipping duplicate event",
+			zap.String("event_type", string(sourceEvent.EventType)),
+			zap.String("resource_id", sourceEvent.ResourceID),
+		)
+		// Return nil to ACK - we've processed it (even though we skipped it)
+		return nil
 	}
 
 	d.logger.Info("Created webhook events",

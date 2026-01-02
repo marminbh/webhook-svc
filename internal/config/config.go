@@ -21,12 +21,16 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	DBName   string
-	SSLMode  string
+	Host            string
+	Port            string
+	User            string
+	Password        string
+	DBName          string
+	SSLMode         string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime int // in minutes
+	ConnMaxIdleTime int // in minutes
 }
 
 type RabbitMQConfig struct {
@@ -46,6 +50,8 @@ type DispatcherConfig struct {
 	DeliveryRoutingKey string
 	DeliveryQueue      string
 	PrefetchCount      int
+	MaxAttempts        int // Maximum retry attempts for webhook events
+	BatchSize          int // Batch size for creating webhook events
 }
 
 func Load() (*Config, error) {
@@ -61,6 +67,22 @@ func Load() (*Config, error) {
 	dbPassword := getEnv("DB_PASSWORD", &missingVars)
 	dbName := getEnv("DB_NAME", &missingVars)
 	dbSSLMode := getEnv("DB_SSLMODE", &missingVars)
+	dbMaxOpenConns, intErr := getEnvIntWithDefault("DB_MAX_OPEN_CONNS", 25)
+	if intErr != nil {
+		return nil, intErr
+	}
+	dbMaxIdleConns, intErr := getEnvIntWithDefault("DB_MAX_IDLE_CONNS", 5)
+	if intErr != nil {
+		return nil, intErr
+	}
+	dbConnMaxLifetime, intErr := getEnvIntWithDefault("DB_CONN_MAX_LIFETIME_MIN", 5)
+	if intErr != nil {
+		return nil, intErr
+	}
+	dbConnMaxIdleTime, intErr := getEnvIntWithDefault("DB_CONN_MAX_IDLE_TIME_MIN", 1)
+	if intErr != nil {
+		return nil, intErr
+	}
 
 	rabbitMQURL := os.Getenv("RABBITMQ_URL") // Optional, can be empty
 	rabbitMQHost := getEnv("RABBITMQ_HOST", &missingVars)
@@ -76,13 +98,20 @@ func Load() (*Config, error) {
 	dispatcherDeliveryRoutingKey := getEnv("DISPATCHER_DELIVERY_ROUTING_KEY", &missingVars)
 	dispatcherDeliveryQueue := getEnv("DISPATCHER_DELIVERY_QUEUE", &missingVars)
 	dispatcherPrefetchCount, intErr := getEnvInt("DISPATCHER_PREFETCH_COUNT", &missingVars)
+	if intErr != nil {
+		return nil, intErr
+	}
+	dispatcherMaxAttempts, intErr := getEnvIntWithDefault("DISPATCHER_MAX_ATTEMPTS", 8)
+	if intErr != nil {
+		return nil, intErr
+	}
+	dispatcherBatchSize, intErr := getEnvIntWithDefault("DISPATCHER_BATCH_SIZE", 100)
+	if intErr != nil {
+		return nil, intErr
+	}
 
 	if len(missingVars) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missingVars, ", "))
-	}
-
-	if intErr != nil {
-		return nil, intErr
 	}
 
 	config := &Config{
@@ -92,12 +121,16 @@ func Load() (*Config, error) {
 			LogLevel: serverLogLevel,
 		},
 		Database: DatabaseConfig{
-			Host:     dbHost,
-			Port:     dbPort,
-			User:     dbUser,
-			Password: dbPassword,
-			DBName:   dbName,
-			SSLMode:  dbSSLMode,
+			Host:            dbHost,
+			Port:            dbPort,
+			User:            dbUser,
+			Password:        dbPassword,
+			DBName:          dbName,
+			SSLMode:         dbSSLMode,
+			MaxOpenConns:    dbMaxOpenConns,
+			MaxIdleConns:    dbMaxIdleConns,
+			ConnMaxLifetime: dbConnMaxLifetime,
+			ConnMaxIdleTime: dbConnMaxIdleTime,
 		},
 		RabbitMQ: RabbitMQConfig{
 			URL:      rabbitMQURL,
@@ -115,6 +148,8 @@ func Load() (*Config, error) {
 			DeliveryRoutingKey: dispatcherDeliveryRoutingKey,
 			DeliveryQueue:      dispatcherDeliveryQueue,
 			PrefetchCount:      dispatcherPrefetchCount,
+			MaxAttempts:        dispatcherMaxAttempts,
+			BatchSize:          dispatcherBatchSize,
 		},
 	}
 
@@ -170,4 +205,19 @@ func getEnvWithDefault(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// getEnvIntWithDefault retrieves an environment variable as an integer with a default value
+func getEnvIntWithDefault(key string, defaultValue int) (int, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
+	}
+
+	result, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("environment variable %s must be a valid integer: %w", key, err)
+	}
+
+	return result, nil
 }
