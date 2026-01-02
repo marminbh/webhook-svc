@@ -15,8 +15,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port string
-	Host string
+	Port     string
+	Host     string
+	LogLevel string
 }
 
 type DatabaseConfig struct {
@@ -52,6 +53,7 @@ func Load() (*Config, error) {
 
 	serverPort := getEnv("SERVER_PORT", &missingVars)
 	serverHost := getEnv("SERVER_HOST", &missingVars)
+	serverLogLevel := getEnvWithDefault("LOG_LEVEL", "info")
 
 	dbHost := getEnv("DB_HOST", &missingVars)
 	dbPort := getEnv("DB_PORT", &missingVars)
@@ -85,8 +87,9 @@ func Load() (*Config, error) {
 
 	config := &Config{
 		Server: ServerConfig{
-			Port: serverPort,
-			Host: serverHost,
+			Port:     serverPort,
+			Host:     serverHost,
+			LogLevel: serverLogLevel,
 		},
 		Database: DatabaseConfig{
 			Host:     dbHost,
@@ -158,4 +161,13 @@ func getEnvInt(key string, missingVars *[]string) (int, error) {
 	}
 
 	return result, nil
+}
+
+// getEnvWithDefault retrieves an environment variable with a default value if not set
+func getEnvWithDefault(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }

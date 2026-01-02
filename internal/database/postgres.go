@@ -86,11 +86,3 @@ func HealthCheck(ctx context.Context) error {
 
 	return sqlDB.PingContext(ctx)
 }
-
-// AutoMigrate runs database migrations for the given models
-func AutoMigrate(dst ...interface{}) error {
-	if DB == nil {
-		return fmt.Errorf("database connection is nil")
-	}
-	return DB.AutoMigrate(dst...)
-}

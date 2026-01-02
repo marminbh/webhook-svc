@@ -10,6 +10,13 @@ import (
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 )
 
+var rmqConnection *rabbitmq.Connection
+
+// SetRabbitMQConnection sets the RabbitMQ connection for health checks
+func SetRabbitMQConnection(conn *rabbitmq.Connection) {
+	rmqConnection = conn
+}
+
 type HealthResponse struct {
 	Status    string            `json:"status"`
 	Timestamp string            `json:"timestamp"`
@@ -33,7 +40,7 @@ func HealthCheck(c *fiber.Ctx) error {
 	}
 
 	// Check RabbitMQ
-	if rabbitmq.Conn == nil || rabbitmq.Conn.IsClosed() {
+	if rmqConnection == nil || !rmqConnection.IsHealthy() {
 		services["rabbitmq"] = "unhealthy: connection closed"
 		status = "unhealthy"
 	} else {

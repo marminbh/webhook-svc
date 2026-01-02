@@ -14,23 +14,28 @@ import (
 	"github.com/marminbh/webhook-svc/internal/config"
 	"github.com/marminbh/webhook-svc/internal/database"
 	"github.com/marminbh/webhook-svc/internal/dispatcher"
+	"github.com/marminbh/webhook-svc/internal/handlers"
 	"github.com/marminbh/webhook-svc/internal/logger"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 	"github.com/marminbh/webhook-svc/internal/routes"
 )
 
 func main() {
-	// Initialize logger (production mode by default, can be changed via env)
-	devMode := os.Getenv("LOG_LEVEL") == "debug"
-	if err := logger.Init(devMode); err != nil {
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		panic("Failed to load config: " + err.Error())
+	}
+
+	// Initialize logger with log level from config
+	if err := logger.Init(cfg.Server.LogLevel); err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer logger.Sync()
 
-	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		logger.Fatal("Failed to load config", zap.Error(err))
+	// Run database migrations
+	if err := database.RunMigrations(&cfg.Database); err != nil {
+		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
 
 	// Connect to PostgreSQL
@@ -44,13 +49,17 @@ func main() {
 	}()
 
 	// Connect to RabbitMQ
-	if err := rabbitmq.Connect(&cfg.RabbitMQ); err != nil {
+	rmqConn := rabbitmq.NewConnection(&cfg.RabbitMQ)
+	if err := rmqConn.Connect(); err != nil {
 		logger.Fatal("Failed to connect to RabbitMQ", zap.Error(err))
 	}
-	defer rabbitmq.Close()
+	defer rmqConn.Close()
+
+	// Set RabbitMQ connection for health checks
+	handlers.SetRabbitMQConnection(rmqConn)
 
 	// Initialize and start dispatcher
-	disp := dispatcher.NewDispatcher(&cfg.Dispatcher)
+	disp := dispatcher.NewDispatcher(&cfg.Dispatcher, rmqConn)
 	if err := disp.Start(); err != nil {
 		logger.Fatal("Failed to start dispatcher", zap.Error(err))
 	}

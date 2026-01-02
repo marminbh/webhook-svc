@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/marminbh/webhook-svc/internal/config"
+	"github.com/marminbh/webhook-svc/internal/consumer"
 	"github.com/marminbh/webhook-svc/internal/logger"
 	"github.com/marminbh/webhook-svc/internal/models"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
@@ -18,16 +19,19 @@ import (
 // Dispatcher handles consuming events and creating webhook_events
 type Dispatcher struct {
 	cfg         *config.DispatcherConfig
+	conn        *rabbitmq.Connection
 	ctx         context.Context
 	cancel      context.CancelFunc
 	consumerTag string
+	started     bool
 }
 
 // NewDispatcher creates a new dispatcher instance
-func NewDispatcher(cfg *config.DispatcherConfig) *Dispatcher {
+func NewDispatcher(cfg *config.DispatcherConfig, conn *rabbitmq.Connection) *Dispatcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Dispatcher{
 		cfg:         cfg,
+		conn:        conn,
 		ctx:         ctx,
 		cancel:      cancel,
 		consumerTag: fmt.Sprintf("webhook-dispatcher-%d", time.Now().Unix()),
@@ -52,7 +56,7 @@ func (d *Dispatcher) Start() error {
 	}
 
 	// Set QoS for prefetch count
-	if err := rabbitmq.SetQoS(d.cfg.PrefetchCount, 0, false); err != nil {
+	if err := d.conn.SetQoS(d.cfg.PrefetchCount, 0, false); err != nil {
 		return fmt.Errorf("failed to set QoS: %w", err)
 	}
 
@@ -61,8 +65,28 @@ func (d *Dispatcher) Start() error {
 		zap.String("delivery_queue", d.cfg.DeliveryQueue),
 	)
 
+	// Start consuming messages
+	if err := d.startConsuming(); err != nil {
+		return err
+	}
+
+	d.started = true
+	logger.Info("Dispatcher started and consuming messages",
+		zap.String("source_queue", d.cfg.SourceQueue),
+		zap.String("consumer_tag", d.consumerTag),
+	)
+	return nil
+}
+
+// startConsuming starts consuming messages from the queue
+func (d *Dispatcher) startConsuming() error {
+	// Set QoS for prefetch count
+	if err := d.conn.SetQoS(d.cfg.PrefetchCount, 0, false); err != nil {
+		return fmt.Errorf("failed to set QoS: %w", err)
+	}
+
 	// Start consuming messages (assumes queue exists - will fail if it doesn't)
-	messages, err := rabbitmq.ConsumeMessages(
+	messages, err := d.conn.ConsumeMessages(
 		d.cfg.SourceQueue,
 		d.consumerTag,
 		false, // autoAck (we'll manually ACK)
@@ -77,10 +101,6 @@ func (d *Dispatcher) Start() error {
 	// Process messages in a goroutine
 	go d.processMessages(messages)
 
-	logger.Info("Dispatcher started and consuming messages",
-		zap.String("source_queue", d.cfg.SourceQueue),
-		zap.String("consumer_tag", d.consumerTag),
-	)
 	return nil
 }
 
@@ -92,8 +112,9 @@ func (d *Dispatcher) Stop() error {
 	d.cancel()
 
 	// Cancel consumer
-	if rabbitmq.Channel != nil {
-		if err := rabbitmq.Channel.Cancel(d.consumerTag, false); err != nil {
+	ch := d.conn.GetChannel()
+	if ch != nil {
+		if err := ch.Cancel(d.consumerTag, false); err != nil {
 			logger.Error("Failed to cancel consumer",
 				zap.String("consumer_tag", d.consumerTag),
 				zap.Error(err),
@@ -114,102 +135,127 @@ func (d *Dispatcher) processMessages(messages <-chan amqp.Delivery) {
 			return
 		case msg, ok := <-messages:
 			if !ok {
-				logger.Warn("Message channel closed")
+				logger.Warn("Message channel closed, waiting for reconnection...",
+					zap.String("source_queue", d.cfg.SourceQueue),
+				)
+				// Channel closed - wait a bit and try to restart consuming
+				// The connection will automatically reconnect, so we retry after a delay
+				time.Sleep(2 * time.Second)
+				if d.started {
+					if err := d.startConsuming(); err != nil {
+						logger.Error("Failed to restart consuming after channel close",
+							zap.String("source_queue", d.cfg.SourceQueue),
+							zap.Error(err),
+						)
+						// Retry again after a longer delay
+						time.Sleep(5 * time.Second)
+						if err := d.startConsuming(); err != nil {
+							logger.Error("Failed to restart consuming after second attempt",
+								zap.String("source_queue", d.cfg.SourceQueue),
+								zap.Error(err),
+							)
+						}
+					}
+				}
 				return
 			}
-			d.handleMessage(msg)
+			// Use abstract consumer pattern to process message
+			consumer.ProcessMessage(d.cfg.SourceQueue, msg, d)
 		}
 	}
 }
 
-// handleMessage processes a single message
-func (d *Dispatcher) handleMessage(msg amqp.Delivery) {
-	// Unmarshal source event
-	var sourceEvent models.SourceEvent
-	if err := json.Unmarshal(msg.Body, &sourceEvent); err != nil {
+// HandleEvent implements the consumer.EventHandler interface
+// This method is called by the abstract consumer after base64 decoding
+func (d *Dispatcher) HandleEvent(decodedMessage string) error {
+	// Unmarshal source event from decoded JSON string
+	var sourceEvent models.NotificationEvent
+	if err := json.Unmarshal([]byte(decodedMessage), &sourceEvent); err != nil {
 		logger.Error("Failed to unmarshal source event",
 			zap.Error(err),
-			zap.ByteString("message_body", msg.Body),
+			zap.String("decoded_message", decodedMessage),
 		)
-		// NACK and requeue for retry (might be transient)
-		msg.Nack(false, true)
-		return
+		return fmt.Errorf("failed to unmarshal source event: %w", err)
+	}
+
+	// Validate event type
+	if _, err := models.ParseNotificationEventType(string(sourceEvent.EventType)); err != nil {
+		logger.Error("Invalid event type received",
+			zap.String("event_type", string(sourceEvent.EventType)),
+			zap.String("resource_id", sourceEvent.ResourceID),
+			zap.String("org_id", sourceEvent.OrgID),
+			zap.Error(err),
+		)
+		// Return error to reject message (don't requeue invalid events)
+		return fmt.Errorf("invalid event type: %w", err)
 	}
 
 	logger.Info("Processing event",
-		zap.String("event_type", sourceEvent.EventType),
+		zap.String("event_type", string(sourceEvent.EventType)),
 		zap.String("resource_id", sourceEvent.ResourceID),
-		zap.String("tenant_id", sourceEvent.TenantID),
+		zap.String("org_id", sourceEvent.OrgID),
 	)
 
 	// Check for duplicate events
-	isDuplicate, err := checkDuplicateEvent(sourceEvent.EventType, sourceEvent.ResourceID)
+	isDuplicate, err := checkDuplicateEvent(string(sourceEvent.EventType), sourceEvent.ResourceID)
 	if err != nil {
 		logger.Error("Error checking duplicate event",
-			zap.String("event_type", sourceEvent.EventType),
+			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.Error(err),
 		)
-		// NACK and requeue
-		msg.Nack(false, true)
-		return
+		return fmt.Errorf("error checking duplicate event: %w", err)
 	}
 
 	if isDuplicate {
 		logger.Info("Skipping duplicate event",
-			zap.String("event_type", sourceEvent.EventType),
+			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 		)
-		// ACK the message since we've processed it (even though we skipped it)
-		msg.Ack(false)
-		return
+		// Return nil to ACK - we've processed it (even though we skipped it)
+		return nil
 	}
 
-	// Get active webhook configs for the tenant
-	webhookConfigs, err := getWebhookConfigsByTenant(sourceEvent.TenantID)
+	// Get active webhook configs for the org
+	webhookConfigs, err := getWebhookConfigsByTenant(sourceEvent.OrgID)
 	if err != nil {
 		logger.Error("Error getting webhook configs",
-			zap.String("tenant_id", sourceEvent.TenantID),
+			zap.String("org_id", sourceEvent.OrgID),
 			zap.Error(err),
 		)
-		// NACK and requeue
-		msg.Nack(false, true)
-		return
+		return fmt.Errorf("error getting webhook configs: %w", err)
 	}
 
 	if len(webhookConfigs) == 0 {
-		logger.Info("No active webhook configs found for tenant",
-			zap.String("tenant_id", sourceEvent.TenantID),
+		logger.Info("No active webhook configs found for org",
+			zap.String("org_id", sourceEvent.OrgID),
 		)
-		// ACK the message - no webhooks to deliver
-		msg.Ack(false)
-		return
+		// Return nil to ACK - no webhooks to deliver
+		return nil
 	}
 
 	// Create webhook_events for each config
 	events, err := createWebhookEvents(
 		webhookConfigs,
-		sourceEvent.EventType,
+		string(sourceEvent.EventType),
 		sourceEvent.ResourceID,
 		sourceEvent.ResourceURL,
-		sourceEvent.TenantID,
-		sourceEvent.EventTimestamp,
+		sourceEvent.OrgID,
+		sourceEvent.Timestamp,
 	)
 	if err != nil {
 		logger.Error("Error creating webhook events",
-			zap.String("event_type", sourceEvent.EventType),
+			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
-			zap.String("tenant_id", sourceEvent.TenantID),
+			zap.String("org_id", sourceEvent.OrgID),
 			zap.Error(err),
 		)
-		// NACK and requeue
-		msg.Nack(false, true)
-		return
+		return fmt.Errorf("error creating webhook events: %w", err)
 	}
 
 	logger.Info("Created webhook events",
 		zap.Int("event_count", len(events)),
-		zap.String("event_type", sourceEvent.EventType),
+		zap.String("event_type", string(sourceEvent.EventType)),
 		zap.String("resource_id", sourceEvent.ResourceID),
 	)
 
@@ -237,15 +283,15 @@ func (d *Dispatcher) handleMessage(msg amqp.Delivery) {
 			zap.Int("failed_count", failedPublishes),
 			zap.Int("total_count", len(events)),
 		)
-		// Still ACK the source message since events are in DB and will be picked up by CronJob
+		// Still return nil to ACK since events are in DB and will be picked up by CronJob
 	} else {
 		logger.Info("Successfully published events to delivery queue",
 			zap.Int("event_count", len(events)),
 		)
 	}
 
-	// ACK the source message
-	msg.Ack(false)
+	// Return nil to ACK the message
+	return nil
 }
 
 // publishToDeliveryQueue publishes an event_id to the delivery queue
@@ -259,7 +305,7 @@ func (d *Dispatcher) publishToDeliveryQueue(eventID string) error {
 		return fmt.Errorf("failed to marshal delivery message: %w", err)
 	}
 
-	err = rabbitmq.PublishMessage(
+	err = d.conn.PublishMessage(
 		d.cfg.DeliveryExchange,
 		d.cfg.DeliveryRoutingKey,
 		false, // mandatory
