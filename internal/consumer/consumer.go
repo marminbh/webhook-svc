@@ -2,12 +2,9 @@ package consumer
 
 import (
 	"encoding/base64"
-	"fmt"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
-
-	"github.com/marminbh/webhook-svc/internal/logger"
 )
 
 // EventHandler is the interface that consumers must implement
@@ -21,6 +18,7 @@ type EventHandler interface {
 // 2. Calls the handler's HandleEvent method
 // 3. ACKs on success, NACKs (no requeue) on failure
 func ProcessMessage(
+	logger *zap.Logger,
 	queue string,
 	msg amqp.Delivery,
 	handler EventHandler,
@@ -38,7 +36,7 @@ func ProcessMessage(
 			zap.Uint64("delivery_tag", msg.DeliveryTag),
 			zap.Error(err),
 		)
-		rejectMessage(msg)
+		rejectMessage(logger, msg)
 		return
 	}
 
@@ -50,7 +48,7 @@ func ProcessMessage(
 			zap.String("decoded_message", string(decodedMessage)),
 			zap.Error(err),
 		)
-		rejectMessage(msg)
+		rejectMessage(logger, msg)
 		return
 	}
 
@@ -61,7 +59,7 @@ func ProcessMessage(
 			zap.Uint64("delivery_tag", msg.DeliveryTag),
 			zap.Error(err),
 		)
-		rejectMessage(msg)
+		rejectMessage(logger, msg)
 		return
 	}
 
@@ -72,16 +70,19 @@ func ProcessMessage(
 }
 
 // rejectMessage rejects a message (NACK with requeue=false)
-func rejectMessage(msg amqp.Delivery) {
+// If NACK fails, the error is logged but processing continues to prevent service crashes
+func rejectMessage(logger *zap.Logger, msg amqp.Delivery) {
 	logger.Debug("Rejecting message",
 		zap.Uint64("delivery_tag", msg.DeliveryTag),
 	)
 	if err := msg.Nack(false, false); err != nil {
-		logger.Error("Failed to nack a message",
+		// Log error but don't panic - allow service to continue processing other messages
+		// The message will remain unacknowledged and RabbitMQ will handle it according to
+		// its configuration (e.g., move to dead letter queue if configured)
+		logger.Error("Failed to nack message - message will remain unacknowledged",
 			zap.Uint64("delivery_tag", msg.DeliveryTag),
 			zap.Error(err),
+			zap.String("queue", msg.RoutingKey),
 		)
-		// Panic here to match Java behavior (throws RuntimeException)
-		panic(fmt.Sprintf("failed to nack message: %v", err))
 	}
 }

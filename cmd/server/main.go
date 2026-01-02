@@ -28,44 +28,50 @@ func main() {
 	}
 
 	// Initialize logger with log level from config
-	if err := logger.Init(cfg.Server.LogLevel); err != nil {
+	appLogger, err := logger.Init(cfg.Server.LogLevel)
+	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
-	defer logger.Sync()
+	defer func() {
+		if err := appLogger.Sync(); err != nil {
+			// Ignore sync errors on close
+		}
+	}()
 
 	// Run database migrations
-	if err := database.RunMigrations(&cfg.Database); err != nil {
-		logger.Fatal("Failed to run database migrations", zap.Error(err))
+	if err := database.RunMigrations(&cfg.Database, appLogger); err != nil {
+		appLogger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
 
 	// Connect to PostgreSQL
-	if err := database.Connect(&cfg.Database); err != nil {
-		logger.Fatal("Failed to connect to database", zap.Error(err))
+	db, err := database.Connect(&cfg.Database, appLogger)
+	if err != nil {
+		appLogger.Fatal("Failed to connect to database", zap.Error(err))
 	}
 	defer func() {
-		if err := database.Close(); err != nil {
-			logger.Error("Error closing database", zap.Error(err))
+		if err := database.Close(db, appLogger); err != nil {
+			appLogger.Error("Error closing database", zap.Error(err))
 		}
 	}()
 
 	// Connect to RabbitMQ
-	rmqConn := rabbitmq.NewConnection(&cfg.RabbitMQ)
+	rmqConn := rabbitmq.NewConnection(&cfg.RabbitMQ, appLogger)
 	if err := rmqConn.Connect(); err != nil {
-		logger.Fatal("Failed to connect to RabbitMQ", zap.Error(err))
+		appLogger.Fatal("Failed to connect to RabbitMQ", zap.Error(err))
 	}
 	defer rmqConn.Close()
 
-	// Set RabbitMQ connection for health checks
-	handlers.SetRabbitMQConnection(rmqConn)
+	// Create health handler with dependencies
+	healthHandler := handlers.NewHealthHandler(db, rmqConn)
 
-	// Initialize and start dispatcher
-	disp := dispatcher.NewDispatcher(&cfg.Dispatcher, rmqConn)
+	// Initialize and start dispatcher with dependencies
+	disp := dispatcher.NewDispatcher(&cfg.Dispatcher, rmqConn, db, appLogger)
 	if err := disp.Start(); err != nil {
-		logger.Fatal("Failed to start dispatcher", zap.Error(err))
+		appLogger.Fatal("Failed to start dispatcher", zap.Error(err))
 	}
 	defer func() {
 		if err := disp.Stop(); err != nil {
-			logger.Error("Error stopping dispatcher", zap.Error(err))
+			appLogger.Error("Error stopping dispatcher", zap.Error(err))
 		}
 	}()
 
@@ -86,17 +92,17 @@ func main() {
 		AllowHeaders: "Origin,Content-Type,Accept,Authorization",
 	}))
 
-	// Setup routes
-	routes.SetupRoutes(app)
+	// Setup routes with dependencies
+	routes.SetupRoutes(app, healthHandler)
 
 	// Start server in a goroutine
 	go func() {
 		addr := cfg.Server.Host + ":" + cfg.Server.Port
-		logger.Info("Server starting",
+		appLogger.Info("Server starting",
 			zap.String("address", addr),
 		)
 		if err := app.Listen(addr); err != nil {
-			logger.Fatal("Failed to start server", zap.Error(err))
+			appLogger.Fatal("Failed to start server", zap.Error(err))
 		}
 	}()
 
@@ -105,15 +111,15 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("Shutting down server")
+	appLogger.Info("Shutting down server")
 	if err := app.Shutdown(); err != nil {
-		logger.Error("Error during server shutdown", zap.Error(err))
+		appLogger.Error("Error during server shutdown", zap.Error(err))
 	}
 
 	// Stop dispatcher
 	if err := disp.Stop(); err != nil {
-		logger.Error("Error stopping dispatcher", zap.Error(err))
+		appLogger.Error("Error stopping dispatcher", zap.Error(err))
 	}
 
-	logger.Info("Server stopped")
+	appLogger.Info("Server stopped")
 }

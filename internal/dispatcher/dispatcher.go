@@ -8,10 +8,10 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"github.com/marminbh/webhook-svc/internal/config"
 	"github.com/marminbh/webhook-svc/internal/consumer"
-	"github.com/marminbh/webhook-svc/internal/logger"
 	"github.com/marminbh/webhook-svc/internal/models"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 )
@@ -20,18 +20,22 @@ import (
 type Dispatcher struct {
 	cfg         *config.DispatcherConfig
 	conn        *rabbitmq.Connection
+	db          *gorm.DB
+	logger      *zap.Logger
 	ctx         context.Context
 	cancel      context.CancelFunc
 	consumerTag string
 	started     bool
 }
 
-// NewDispatcher creates a new dispatcher instance
-func NewDispatcher(cfg *config.DispatcherConfig, conn *rabbitmq.Connection) *Dispatcher {
+// NewDispatcher creates a new dispatcher instance with dependencies
+func NewDispatcher(cfg *config.DispatcherConfig, conn *rabbitmq.Connection, db *gorm.DB, logger *zap.Logger) *Dispatcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Dispatcher{
 		cfg:         cfg,
 		conn:        conn,
+		db:          db,
+		logger:      logger,
 		ctx:         ctx,
 		cancel:      cancel,
 		consumerTag: fmt.Sprintf("webhook-dispatcher-%d", time.Now().Unix()),
@@ -60,7 +64,7 @@ func (d *Dispatcher) Start() error {
 		return fmt.Errorf("failed to set QoS: %w", err)
 	}
 
-	logger.Info("Dispatcher initialized",
+	d.logger.Info("Dispatcher initialized",
 		zap.String("source_queue", d.cfg.SourceQueue),
 		zap.String("delivery_queue", d.cfg.DeliveryQueue),
 	)
@@ -71,7 +75,7 @@ func (d *Dispatcher) Start() error {
 	}
 
 	d.started = true
-	logger.Info("Dispatcher started and consuming messages",
+	d.logger.Info("Dispatcher started and consuming messages",
 		zap.String("source_queue", d.cfg.SourceQueue),
 		zap.String("consumer_tag", d.consumerTag),
 	)
@@ -106,7 +110,7 @@ func (d *Dispatcher) startConsuming() error {
 
 // Stop gracefully stops the dispatcher
 func (d *Dispatcher) Stop() error {
-	logger.Info("Stopping dispatcher",
+	d.logger.Info("Stopping dispatcher",
 		zap.String("consumer_tag", d.consumerTag),
 	)
 	d.cancel()
@@ -115,14 +119,14 @@ func (d *Dispatcher) Stop() error {
 	ch := d.conn.GetChannel()
 	if ch != nil {
 		if err := ch.Cancel(d.consumerTag, false); err != nil {
-			logger.Error("Failed to cancel consumer",
+			d.logger.Error("Failed to cancel consumer",
 				zap.String("consumer_tag", d.consumerTag),
 				zap.Error(err),
 			)
 		}
 	}
 
-	logger.Info("Dispatcher stopped")
+	d.logger.Info("Dispatcher stopped")
 	return nil
 }
 
@@ -131,11 +135,11 @@ func (d *Dispatcher) processMessages(messages <-chan amqp.Delivery) {
 	for {
 		select {
 		case <-d.ctx.Done():
-			logger.Info("Dispatcher context cancelled, stopping message processing")
+			d.logger.Info("Dispatcher context cancelled, stopping message processing")
 			return
 		case msg, ok := <-messages:
 			if !ok {
-				logger.Warn("Message channel closed, waiting for reconnection...",
+				d.logger.Warn("Message channel closed, waiting for reconnection...",
 					zap.String("source_queue", d.cfg.SourceQueue),
 				)
 				// Channel closed - wait a bit and try to restart consuming
@@ -143,14 +147,14 @@ func (d *Dispatcher) processMessages(messages <-chan amqp.Delivery) {
 				time.Sleep(2 * time.Second)
 				if d.started {
 					if err := d.startConsuming(); err != nil {
-						logger.Error("Failed to restart consuming after channel close",
+						d.logger.Error("Failed to restart consuming after channel close",
 							zap.String("source_queue", d.cfg.SourceQueue),
 							zap.Error(err),
 						)
 						// Retry again after a longer delay
 						time.Sleep(5 * time.Second)
 						if err := d.startConsuming(); err != nil {
-							logger.Error("Failed to restart consuming after second attempt",
+							d.logger.Error("Failed to restart consuming after second attempt",
 								zap.String("source_queue", d.cfg.SourceQueue),
 								zap.Error(err),
 							)
@@ -160,7 +164,7 @@ func (d *Dispatcher) processMessages(messages <-chan amqp.Delivery) {
 				return
 			}
 			// Use abstract consumer pattern to process message
-			consumer.ProcessMessage(d.cfg.SourceQueue, msg, d)
+			consumer.ProcessMessage(d.logger, d.cfg.SourceQueue, msg, d)
 		}
 	}
 }
@@ -171,7 +175,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	// Unmarshal source event from decoded JSON string
 	var sourceEvent models.NotificationEvent
 	if err := json.Unmarshal([]byte(decodedMessage), &sourceEvent); err != nil {
-		logger.Error("Failed to unmarshal source event",
+		d.logger.Error("Failed to unmarshal source event",
 			zap.Error(err),
 			zap.String("decoded_message", decodedMessage),
 		)
@@ -180,7 +184,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 
 	// Validate event type
 	if _, err := models.ParseNotificationEventType(string(sourceEvent.EventType)); err != nil {
-		logger.Error("Invalid event type received",
+		d.logger.Error("Invalid event type received",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.String("org_id", sourceEvent.OrgID),
@@ -190,16 +194,16 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		return fmt.Errorf("invalid event type: %w", err)
 	}
 
-	logger.Info("Processing event",
+	d.logger.Info("Processing event",
 		zap.String("event_type", string(sourceEvent.EventType)),
 		zap.String("resource_id", sourceEvent.ResourceID),
 		zap.String("org_id", sourceEvent.OrgID),
 	)
 
 	// Check for duplicate events
-	isDuplicate, err := checkDuplicateEvent(string(sourceEvent.EventType), sourceEvent.ResourceID)
+	isDuplicate, err := checkDuplicateEvent(d.db, string(sourceEvent.EventType), sourceEvent.ResourceID)
 	if err != nil {
-		logger.Error("Error checking duplicate event",
+		d.logger.Error("Error checking duplicate event",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.Error(err),
@@ -208,7 +212,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	}
 
 	if isDuplicate {
-		logger.Info("Skipping duplicate event",
+		d.logger.Info("Skipping duplicate event",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 		)
@@ -217,9 +221,9 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	}
 
 	// Get active webhook configs for the org
-	webhookConfigs, err := getWebhookConfigsByTenant(sourceEvent.OrgID)
+	webhookConfigs, err := getWebhookConfigsByTenant(d.db, sourceEvent.OrgID)
 	if err != nil {
-		logger.Error("Error getting webhook configs",
+		d.logger.Error("Error getting webhook configs",
 			zap.String("org_id", sourceEvent.OrgID),
 			zap.Error(err),
 		)
@@ -227,7 +231,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	}
 
 	if len(webhookConfigs) == 0 {
-		logger.Info("No active webhook configs found for org",
+		d.logger.Info("No active webhook configs found for org",
 			zap.String("org_id", sourceEvent.OrgID),
 		)
 		// Return nil to ACK - no webhooks to deliver
@@ -236,6 +240,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 
 	// Create webhook_events for each config
 	events, err := createWebhookEvents(
+		d.db,
 		webhookConfigs,
 		string(sourceEvent.EventType),
 		sourceEvent.ResourceID,
@@ -244,7 +249,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		sourceEvent.Timestamp,
 	)
 	if err != nil {
-		logger.Error("Error creating webhook events",
+		d.logger.Error("Error creating webhook events",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.String("org_id", sourceEvent.OrgID),
@@ -253,7 +258,7 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		return fmt.Errorf("error creating webhook events: %w", err)
 	}
 
-	logger.Info("Created webhook events",
+	d.logger.Info("Created webhook events",
 		zap.Int("event_count", len(events)),
 		zap.String("event_type", string(sourceEvent.EventType)),
 		zap.String("resource_id", sourceEvent.ResourceID),
@@ -263,13 +268,13 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	failedPublishes := 0
 	for _, event := range events {
 		if err := d.publishToDeliveryQueue(event.ID.String()); err != nil {
-			logger.Error("Failed to publish event to delivery queue",
+			d.logger.Error("Failed to publish event to delivery queue",
 				zap.String("event_id", event.ID.String()),
 				zap.Error(err),
 			)
 			// Update next_attempt_at so CronJob picks it up
-			if updateErr := updateEventOnPublishFailure(event.ID, 1); updateErr != nil {
-				logger.Error("Failed to update event on publish failure",
+			if updateErr := updateEventOnPublishFailure(d.db, event.ID, 1); updateErr != nil {
+				d.logger.Error("Failed to update event on publish failure",
 					zap.String("event_id", event.ID.String()),
 					zap.Error(updateErr),
 				)
@@ -279,13 +284,13 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 	}
 
 	if failedPublishes > 0 {
-		logger.Warn("Failed to publish some events to delivery queue",
+		d.logger.Warn("Failed to publish some events to delivery queue",
 			zap.Int("failed_count", failedPublishes),
 			zap.Int("total_count", len(events)),
 		)
 		// Still return nil to ACK since events are in DB and will be picked up by CronJob
 	} else {
-		logger.Info("Successfully published events to delivery queue",
+		d.logger.Info("Successfully published events to delivery queue",
 			zap.Int("event_count", len(events)),
 		)
 	}

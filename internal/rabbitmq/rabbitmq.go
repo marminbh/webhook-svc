@@ -9,7 +9,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/marminbh/webhook-svc/internal/config"
-	"github.com/marminbh/webhook-svc/internal/logger"
 )
 
 // Connection manages RabbitMQ connection and channel with automatic recovery
@@ -17,6 +16,7 @@ type Connection struct {
 	conn         *amqp.Connection
 	channel      *amqp.Channel
 	config       *config.RabbitMQConfig
+	logger       *zap.Logger
 	connClose    chan *amqp.Error
 	channelClose chan *amqp.Error
 	stopChan     chan struct{}
@@ -26,9 +26,10 @@ type Connection struct {
 }
 
 // NewConnection creates a new Connection instance
-func NewConnection(rabbitMQConfig *config.RabbitMQConfig) *Connection {
+func NewConnection(rabbitMQConfig *config.RabbitMQConfig, logger *zap.Logger) *Connection {
 	return &Connection{
 		config:   rabbitMQConfig,
+		logger:   logger,
 		stopChan: make(chan struct{}),
 	}
 }
@@ -43,7 +44,7 @@ func (c *Connection) Connect() error {
 
 	for attempt < maxInitialAttempts {
 		attempt++
-		logger.Info("Attempting initial connection to RabbitMQ",
+		c.logger.Info("Attempting initial connection to RabbitMQ",
 			zap.Int("attempt", attempt),
 			zap.Int("max_attempts", maxInitialAttempts),
 		)
@@ -53,7 +54,7 @@ func (c *Connection) Connect() error {
 				return fmt.Errorf("failed to connect to RabbitMQ after %d attempts: %w", maxInitialAttempts, err)
 			}
 
-			logger.Warn("Initial connection to RabbitMQ failed, retrying...",
+			c.logger.Warn("Initial connection to RabbitMQ failed, retrying...",
 				zap.Error(err),
 				zap.Int("attempt", attempt),
 				zap.Duration("backoff", backoff),
@@ -68,7 +69,7 @@ func (c *Connection) Connect() error {
 		}
 
 		// Connection successful
-		logger.Info("Initial connection to RabbitMQ established",
+		c.logger.Info("Initial connection to RabbitMQ established",
 			zap.Int("attempt", attempt),
 		)
 		break
@@ -121,7 +122,7 @@ func (c *Connection) connect() error {
 		return fmt.Errorf("failed to open channel: %w", err)
 	}
 
-	logger.Info("Successfully connected to RabbitMQ",
+	c.logger.Info("Successfully connected to RabbitMQ",
 		zap.String("host", c.config.Host),
 		zap.String("port", c.config.Port),
 		zap.String("vhost", c.config.VHost),
@@ -137,7 +138,7 @@ func (c *Connection) monitorConnection() {
 		c.mu.RLock()
 		if c.conn == nil || c.channel == nil {
 			c.mu.RUnlock()
-			logger.Error("Connection or channel not initialized, cannot monitor connection")
+			c.logger.Error("Connection or channel not initialized, cannot monitor connection")
 			return
 		}
 
@@ -150,7 +151,7 @@ func (c *Connection) monitorConnection() {
 			return
 		case err := <-connClose:
 			if err != nil {
-				logger.Error("RabbitMQ connection closed, attempting to reconnect",
+				c.logger.Error("RabbitMQ connection closed, attempting to reconnect",
 					zap.Error(err),
 					zap.String("reason", err.Reason),
 				)
@@ -160,7 +161,7 @@ func (c *Connection) monitorConnection() {
 			}
 		case err := <-channelClose:
 			if err != nil {
-				logger.Error("RabbitMQ channel closed, attempting to reconnect",
+				c.logger.Error("RabbitMQ channel closed, attempting to reconnect",
 					zap.Error(err),
 					zap.String("reason", err.Reason),
 				)
@@ -200,13 +201,13 @@ func (c *Connection) reconnect() {
 		}
 
 		attempt++
-		logger.Info("Attempting to reconnect to RabbitMQ",
+		c.logger.Info("Attempting to reconnect to RabbitMQ",
 			zap.Int("attempt", attempt),
 			zap.Duration("backoff", backoff),
 		)
 
 		if err := c.connect(); err != nil {
-			logger.Warn("Failed to reconnect to RabbitMQ, retrying...",
+			c.logger.Warn("Failed to reconnect to RabbitMQ, retrying...",
 				zap.Error(err),
 				zap.Int("attempt", attempt),
 			)
@@ -220,7 +221,7 @@ func (c *Connection) reconnect() {
 		}
 
 		// Reconnection successful
-		logger.Info("Successfully reconnected to RabbitMQ",
+		c.logger.Info("Successfully reconnected to RabbitMQ",
 			zap.Int("attempt", attempt),
 		)
 
@@ -250,7 +251,7 @@ func (c *Connection) Close() {
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
-		logger.Info("RabbitMQ connection closed")
+		c.logger.Info("RabbitMQ connection closed")
 	}
 }
 
@@ -267,7 +268,7 @@ func (c *Connection) PublishMessage(exchange, routingKey string, mandatory, imme
 
 		if ch == nil || ch.IsClosed() || conn == nil || conn.IsClosed() {
 			if attempt < maxRetries-1 {
-				logger.Warn("RabbitMQ channel not available for publish, retrying...",
+				c.logger.Warn("RabbitMQ channel not available for publish, retrying...",
 					zap.Int("attempt", attempt+1),
 					zap.Int("max_retries", maxRetries),
 				)
@@ -298,7 +299,7 @@ func (c *Connection) PublishMessage(exchange, routingKey string, mandatory, imme
 				isConnectionError = conn.IsClosed()
 			}
 			if attempt < maxRetries-1 && isConnectionError {
-				logger.Warn("Publish failed due to connection issue, retrying...",
+				c.logger.Warn("Publish failed due to connection issue, retrying...",
 					zap.Error(err),
 					zap.Int("attempt", attempt+1),
 				)

@@ -5,16 +5,24 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 
 	"github.com/marminbh/webhook-svc/internal/database"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 )
 
-var rmqConnection *rabbitmq.Connection
+// HealthHandler holds dependencies for health check endpoint
+type HealthHandler struct {
+	DB  *gorm.DB
+	RMQ *rabbitmq.Connection
+}
 
-// SetRabbitMQConnection sets the RabbitMQ connection for health checks
-func SetRabbitMQConnection(conn *rabbitmq.Connection) {
-	rmqConnection = conn
+// NewHealthHandler creates a new health handler with dependencies
+func NewHealthHandler(db *gorm.DB, rmq *rabbitmq.Connection) *HealthHandler {
+	return &HealthHandler{
+		DB:  db,
+		RMQ: rmq,
+	}
 }
 
 type HealthResponse struct {
@@ -24,7 +32,7 @@ type HealthResponse struct {
 }
 
 // HealthCheck handles the health check endpoint
-func HealthCheck(c *fiber.Ctx) error {
+func (h *HealthHandler) HealthCheck(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -32,7 +40,7 @@ func HealthCheck(c *fiber.Ctx) error {
 	status := "healthy"
 
 	// Check database
-	if err := database.HealthCheck(ctx); err != nil {
+	if err := database.HealthCheck(ctx, h.DB); err != nil {
 		services["database"] = "unhealthy: " + err.Error()
 		status = "unhealthy"
 	} else {
@@ -40,7 +48,7 @@ func HealthCheck(c *fiber.Ctx) error {
 	}
 
 	// Check RabbitMQ
-	if rmqConnection == nil || !rmqConnection.IsHealthy() {
+	if h.RMQ == nil || !h.RMQ.IsHealthy() {
 		services["rabbitmq"] = "unhealthy: connection closed"
 		status = "unhealthy"
 	} else {

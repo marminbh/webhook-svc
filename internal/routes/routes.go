@@ -5,10 +5,10 @@ import (
 	"github.com/marminbh/webhook-svc/internal/handlers"
 )
 
-// SetupRoutes configures all application routes
-func SetupRoutes(app *fiber.App) {
+// SetupRoutes configures all application routes with dependencies
+func SetupRoutes(app *fiber.App, healthHandler *handlers.HealthHandler) {
 	// Health check endpoint
-	app.Get("/health", handlers.HealthCheck)
+	app.Get("/health", healthHandler.HealthCheck)
 
 	// API v1 routes
 	api := app.Group("/api/v1")
