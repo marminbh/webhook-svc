@@ -182,18 +182,6 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		return fmt.Errorf("failed to unmarshal source event: %w", err)
 	}
 
-	// Validate event type
-	if _, err := models.ParseNotificationEventType(string(sourceEvent.EventType)); err != nil {
-		d.logger.Error("Invalid event type received",
-			zap.String("event_type", string(sourceEvent.EventType)),
-			zap.String("resource_id", sourceEvent.ResourceID),
-			zap.String("org_id", sourceEvent.OrgID),
-			zap.Error(err),
-		)
-		// Return error to reject message (don't requeue invalid events)
-		return fmt.Errorf("invalid event type: %w", err)
-	}
-
 	d.logger.Info("Processing event",
 		zap.String("event_type", string(sourceEvent.EventType)),
 		zap.String("resource_id", sourceEvent.ResourceID),

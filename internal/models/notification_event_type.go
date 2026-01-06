@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -22,24 +23,43 @@ const (
 // ParseNotificationEventType parses a string into a NotificationEventType
 // Returns an error if the event type is unknown
 func ParseNotificationEventType(name string) (NotificationEventType, error) {
-	name = strings.ToLower(strings.TrimSpace(name))
+	normalized := strings.ToLower(strings.TrimSpace(name))
 
-	validTypes := []NotificationEventType{
-		SaleInvoiceCreate,
-		SaleInvoiceUpdate,
-		SaleCreditNoteCreate,
-		SaleCreditNoteUpdate,
-		PurchaseInvoiceCreate,
-		PurchaseInvoiceUpdate,
-		PurchaseCreditNoteCreate,
-		PurchaseCreditNoteUpdate,
+	switch normalized {
+	case string(SaleInvoiceCreate):
+		return SaleInvoiceCreate, nil
+	case string(SaleInvoiceUpdate):
+		return SaleInvoiceUpdate, nil
+	case string(SaleCreditNoteCreate):
+		return SaleCreditNoteCreate, nil
+	case string(SaleCreditNoteUpdate):
+		return SaleCreditNoteUpdate, nil
+	case string(PurchaseInvoiceCreate):
+		return PurchaseInvoiceCreate, nil
+	case string(PurchaseInvoiceUpdate):
+		return PurchaseInvoiceUpdate, nil
+	case string(PurchaseCreditNoteCreate):
+		return PurchaseCreditNoteCreate, nil
+	case string(PurchaseCreditNoteUpdate):
+		return PurchaseCreditNoteUpdate, nil
+	default:
+		return "", fmt.Errorf("unknown notification event type: %s", name)
+	}
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for NotificationEventType
+// This validates and normalizes the event type during JSON parsing
+func (net *NotificationEventType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
 	}
 
-	for _, eventType := range validTypes {
-		if string(eventType) == name {
-			return eventType, nil
-		}
+	parsed, err := ParseNotificationEventType(s)
+	if err != nil {
+		return err
 	}
 
-	return "", fmt.Errorf("unknown notification event type: %s", name)
+	*net = parsed
+	return nil
 }

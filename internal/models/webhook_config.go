@@ -9,7 +9,7 @@ import (
 
 type WebhookConfig struct {
 	ID             uuid.UUID      `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-	CustomerID     uuid.UUID      `gorm:"type:uuid;not null" json:"customer_id"`
+	CustomerID     string         `gorm:"type:text;not null" json:"customer_id"`
 	URL            string         `gorm:"not null" json:"url"`
 	Secret         string         `json:"secret"` // secret for HMAC
 	Active         bool           `gorm:"default:true" json:"active"`

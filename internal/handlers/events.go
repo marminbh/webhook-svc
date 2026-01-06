@@ -41,22 +41,17 @@ type EventDTO struct {
 
 // GetEvents handles GET /events endpoint
 // Query parameters:
-//   - org_id (required): UUID of the organization
+//   - org_id (required): Organization ID (MongoDB ObjectID)
 //   - limit (optional, default 25): Number of events to return
 //   - offset (optional, default 0): Number of events to skip
+//
+// Note: org_id validation will be handled via header validation in the future
 func (h *EventsHandler) GetEvents(c *fiber.Ctx) error {
 	// Parse org_id from query parameter
-	orgIDStr := c.Query("org_id")
-	if orgIDStr == "" {
+	orgID := c.Query("org_id")
+	if orgID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "org_id query parameter is required",
-		})
-	}
-
-	orgID, err := uuid.Parse(orgIDStr)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid org_id format, must be a valid UUID",
 		})
 	}
 
@@ -105,7 +100,7 @@ func (h *EventsHandler) GetEvents(c *fiber.Ctx) error {
 
 	if err := query.Scan(&events).Error; err != nil {
 		h.Logger.Error("Failed to query webhook events",
-			zap.String("org_id", orgID.String()),
+			zap.String("org_id", orgID),
 			zap.Error(err),
 		)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
