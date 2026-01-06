@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+
+	"github.com/marminbh/webhook-svc/internal/utils"
 )
 
 // EventsHandler handles webhook events listing
@@ -89,11 +91,27 @@ func (h *EventsHandler) GetEvents(c *fiber.Ctx) error {
 
 	var events []eventRow
 
+	// Convert MongoDB ObjectID to UUID by prepending zeros
+	customerUUID, err := utils.ConvertMongoIDToUUID(orgID)
+	if err != nil {
+		// If conversion fails, try parsing as UUID directly (in case it's already a UUID)
+		customerUUID, err = uuid.Parse(orgID)
+		if err != nil {
+			h.Logger.Error("Invalid org_id format",
+				zap.String("org_id", orgID),
+				zap.Error(err),
+			)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "org_id must be a valid MongoDB ObjectID or UUID",
+			})
+		}
+	}
+
 	// First, query webhook events with join to webhook_config
 	query := h.DB.Table("webhook_events").
 		Select("webhook_events.id, webhook_events.event_type, webhook_events.status, webhook_events.created_at").
 		Joins("JOIN webhook_config ON webhook_events.webhook_config_id = webhook_config.id").
-		Where("webhook_config.customer_id = ?", orgID).
+		Where("webhook_config.customer_id = ?", customerUUID).
 		Order("webhook_events.created_at DESC").
 		Limit(limit + 1). // Fetch one extra to determine has_more
 		Offset(offset)

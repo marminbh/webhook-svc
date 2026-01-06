@@ -12,6 +12,7 @@ type Config struct {
 	Database   DatabaseConfig
 	RabbitMQ   RabbitMQConfig
 	Dispatcher DispatcherConfig
+	Worker     WorkerConfig
 }
 
 type ServerConfig struct {
@@ -52,6 +53,13 @@ type DispatcherConfig struct {
 	PrefetchCount      int
 	MaxAttempts        int // Maximum retry attempts for webhook events
 	BatchSize          int // Batch size for creating webhook events
+}
+
+type WorkerConfig struct {
+	DeliveryQueue       string // Queue to consume from
+	PrefetchCount       int    // RabbitMQ QoS prefetch
+	HTTPTimeout         int    // HTTP request timeout in seconds (default 10)
+	MaxResponseBodySize int    // Max bytes to store in attempt log (default 1000)
 }
 
 func Load() (*Config, error) {
@@ -110,6 +118,20 @@ func Load() (*Config, error) {
 		return nil, intErr
 	}
 
+	workerDeliveryQueue := getEnv("WORKER_DELIVERY_QUEUE", &missingVars)
+	workerPrefetchCount, intErr := getEnvInt("WORKER_PREFETCH_COUNT", &missingVars)
+	if intErr != nil {
+		return nil, intErr
+	}
+	workerHTTPTimeout, intErr := getEnvIntWithDefault("WORKER_HTTP_TIMEOUT", 10)
+	if intErr != nil {
+		return nil, intErr
+	}
+	workerMaxResponseBodySize, intErr := getEnvIntWithDefault("WORKER_MAX_RESPONSE_BODY_SIZE", 1000)
+	if intErr != nil {
+		return nil, intErr
+	}
+
 	if len(missingVars) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missingVars, ", "))
 	}
@@ -150,6 +172,12 @@ func Load() (*Config, error) {
 			PrefetchCount:      dispatcherPrefetchCount,
 			MaxAttempts:        dispatcherMaxAttempts,
 			BatchSize:          dispatcherBatchSize,
+		},
+		Worker: WorkerConfig{
+			DeliveryQueue:       workerDeliveryQueue,
+			PrefetchCount:       workerPrefetchCount,
+			HTTPTimeout:         workerHTTPTimeout,
+			MaxResponseBodySize: workerMaxResponseBodySize,
 		},
 	}
 

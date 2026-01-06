@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -206,8 +207,8 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		return nil
 	}
 
-	// Atomically check for duplicates and create webhook events in a transaction
-	// This prevents race conditions where concurrent requests could create duplicate events
+	// Create webhook events - database unique constraint prevents duplicates
+	// If a duplicate is detected (unique constraint violation), isDuplicate will be true
 	events, isDuplicate, err := checkAndCreateWebhookEvents(
 		d.db,
 		webhookConfigs,
@@ -215,18 +216,18 @@ func (d *Dispatcher) HandleEvent(decodedMessage string) error {
 		sourceEvent.ResourceID,
 		sourceEvent.ResourceURL,
 		sourceEvent.OrgID,
-		sourceEvent.Timestamp,
+		sourceEvent.Timestamp.Time,
 		d.cfg.MaxAttempts,
 		d.cfg.BatchSize,
 	)
 	if err != nil {
-		d.logger.Error("Error in atomic duplicate check and event creation",
+		d.logger.Error("Error creating webhook events",
 			zap.String("event_type", string(sourceEvent.EventType)),
 			zap.String("resource_id", sourceEvent.ResourceID),
 			zap.String("org_id", sourceEvent.OrgID),
 			zap.Error(err),
 		)
-		return fmt.Errorf("error in atomic duplicate check and event creation: %w", err)
+		return fmt.Errorf("error creating webhook events: %w", err)
 	}
 
 	if isDuplicate {
@@ -290,12 +291,15 @@ func (d *Dispatcher) publishToDeliveryQueue(eventID string) error {
 		return fmt.Errorf("failed to marshal delivery message: %w", err)
 	}
 
+	// Base64 encode the message body to match the consumer pattern
+	encodedBody := []byte(base64.StdEncoding.EncodeToString(body))
+
 	err = d.conn.PublishMessage(
 		d.cfg.DeliveryExchange,
 		d.cfg.DeliveryRoutingKey,
 		false, // mandatory
 		false, // immediate
-		body,
+		encodedBody,
 	)
 
 	if err != nil {

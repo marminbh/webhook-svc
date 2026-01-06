@@ -18,6 +18,7 @@ import (
 	"github.com/marminbh/webhook-svc/internal/logger"
 	"github.com/marminbh/webhook-svc/internal/rabbitmq"
 	"github.com/marminbh/webhook-svc/internal/routes"
+	"github.com/marminbh/webhook-svc/internal/worker"
 )
 
 func main() {
@@ -78,6 +79,17 @@ func main() {
 		}
 	}()
 
+	// Initialize and start worker with dependencies
+	wk := worker.NewWorker(&cfg.Worker, rmqConn, db, appLogger)
+	if err := wk.Start(); err != nil {
+		appLogger.Fatal("Failed to start worker", zap.Error(err))
+	}
+	defer func() {
+		if err := wk.Stop(); err != nil {
+			appLogger.Error("Error stopping worker", zap.Error(err))
+		}
+	}()
+
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
 		AppName:      "Webhook Service",
@@ -122,6 +134,11 @@ func main() {
 	// Stop dispatcher
 	if err := disp.Stop(); err != nil {
 		appLogger.Error("Error stopping dispatcher", zap.Error(err))
+	}
+
+	// Stop worker
+	if err := wk.Stop(); err != nil {
+		appLogger.Error("Error stopping worker", zap.Error(err))
 	}
 
 	appLogger.Info("Server stopped")
