@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
 	"github.com/marminbh/webhook-svc/internal/models"
@@ -101,7 +102,7 @@ func createDeliveryAttemptLog(
 	httpStatus *int,
 	latencyMs *int,
 	responseSummary *string,
-	requestPayload map[string]interface{},
+	requestPayload datatypes.JSON,
 	responsePayload *string,
 ) error {
 	attemptLog := models.DeliveryAttemptLog{

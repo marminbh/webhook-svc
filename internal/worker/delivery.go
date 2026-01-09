@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -123,6 +124,15 @@ func HandleDeliveryMessage(
 		"event_timestamp":  event.EventTimestamp,
 		"webhook_event_id": event.ID.String(),
 	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error("Failed to marshal webhook payload",
+			zap.String("event_id", eventIDStr),
+			zap.Error(err),
+		)
+		// Return error to NACK and retry
+		return err
+	}
 
 	// Record start time for attempt log
 	attemptStartedAt := time.Now()
@@ -156,7 +166,7 @@ func HandleDeliveryMessage(
 			result.HTTPStatus,
 			&result.LatencyMs,
 			result.ResponseSummary,
-			payload,
+			jsonPayload,
 			&result.ResponseBody,
 		)
 		if err != nil {
